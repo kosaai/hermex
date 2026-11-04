@@ -1,0 +1,150 @@
+# Builds an unsigned device IPA for external signing and personal installation.
+# No Apple certificates, provisioning profiles, App Store Connect credentials, or
+# upload actions are used here. The resulting app and every embedded extension
+# must be signed later with matching identifiers and entitlements.
+name: Unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unsigned-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+run-name: "Unsigned IPA from ${{ github.ref_name }}"
+
+jobs:
+  build:
+    name: Build unsigned device IPA
+    runs-on: xcode-27
+    timeout-minutes: 60
+
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      PROJECT_PATH: HermesMobile.xcodeproj
+      SCHEME: HermesMobile
+      CONFIGURATION: Release
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set build paths
+        run: |
+          set -euo pipefail
+          {
+            echo "DERIVED_DATA_PATH=${RUNNER_TEMP}/HermesMobile-unsigned-derived-data"
+            echo "PACKAGE_PATH=${RUNNER_TEMP}/HermesMobile-unsigned.ipa"
+          } >> "${GITHUB_ENV}"
+
+      - name: Verify Xcode and device SDK
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphoneos --find clang
+
+      - name: Resolve Swift packages
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -resolvePackageDependencies \
+            -project "${PROJECT_PATH}" \
+            -scheme "${SCHEME}" \
+            -clonedSourcePackagesDirPath "${RUNNER_TEMP}/SourcePackages"
+
+      - name: Build Release for iPhoneOS without signing
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project "${PROJECT_PATH}" \
+            -scheme "${SCHEME}" \
+            -configuration "${CONFIGURATION}" \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "${DERIVED_DATA_PATH}" \
+            -clonedSourcePackagesDirPath "${RUNNER_TEMP}/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package complete app bundle as unsigned IPA
+        run: |
+          set -euo pipefail
+          app_path="${DERIVED_DATA_PATH}/Build/Products/${CONFIGURATION}-iphoneos/HermesMobile.app"
+          payload_dir="${RUNNER_TEMP}/HermesMobile-unsigned-payload"
+
+          if [[ ! -d "${app_path}" ]]; then
+            echo "Built app not found: ${app_path}" >&2
+            exit 1
+          fi
+
+          # Copy the complete bundle, preserving embedded extensions, resources,
+          # frameworks, Swift package products, and bundle metadata.
+          rm -rf "${payload_dir}"
+          mkdir -p "${payload_dir}/Payload"
+          ditto "${app_path}" "${payload_dir}/Payload/HermesMobile.app"
+
+          for extension in \
+            HermesShareExtension.appex \
+            HermesLiveActivityWidget.appex \
+            HermesNotificationService.appex; do
+            if [[ ! -d "${payload_dir}/Payload/HermesMobile.app/PlugIns/${extension}" ]]; then
+              echo "Required embedded extension is missing: ${extension}" >&2
+              exit 1
+            fi
+          done
+
+          if [[ ! -d "${payload_dir}/Payload/HermesMobile.app/Frameworks" ]]; then
+            echo "Frameworks directory is missing from the app bundle" >&2
+            exit 1
+          fi
+
+          (cd "${payload_dir}" && /usr/bin/zip -qry "${PACKAGE_PATH}" Payload)
+          unzip -l "${PACKAGE_PATH}"
+          echo "IPA_PATH=${PACKAGE_PATH}" >> "${GITHUB_ENV}"
+          echo "IPA artifact: ${PACKAGE_PATH}"
+
+      - name: Verify unsigned package contents
+        run: |
+          set -euo pipefail
+          unzip -q "${IPA_PATH}" -d "${RUNNER_TEMP}/HermesMobile-unsigned-verify"
+          app="${RUNNER_TEMP}/HermesMobile-unsigned-verify/Payload/HermesMobile.app"
+
+          test -f "${app}/Info.plist"
+          test -d "${app}/PlugIns/HermesShareExtension.appex"
+          test -d "${app}/PlugIns/HermesLiveActivityWidget.appex"
+          test -d "${app}/PlugIns/HermesNotificationService.appex"
+          test -d "${app}/Frameworks"
+
+          # CODE_SIGNING_ALLOWED=NO must leave bundles unsigned. External signing
+          # is intentionally a separate step performed by the installer/owner.
+          if find "${app}" -name _CodeSignature -type d -print -quit | grep -q .; then
+            echo "Unexpected CodeSignature directory found in unsigned IPA" >&2
+            exit 1
+          fi
+
+          {
+            echo "## Unsigned IPA"
+            echo
+            echo "- Artifact: HermesMobile-unsigned.ipa"
+            echo "- Scheme: ${SCHEME}"
+            echo "- Configuration: ${CONFIGURATION}"
+            echo "- SDK: iphoneos"
+            echo "- Signing: disabled"
+            echo "- Embedded extensions: HermesShareExtension, HermesLiveActivityWidget, HermesNotificationService"
+            echo
+            echo "The app, embedded extensions, and any frameworks must be signed later with matching provisioning profiles and entitlements."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v7
+        with:
+          name: HermesMobile-unsigned-ipa
+          path: ${{ env.PACKAGE_PATH }}
+          if-no-files-found: error
+          retention-days: 14
