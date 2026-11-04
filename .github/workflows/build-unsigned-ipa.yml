@@ -99,10 +99,9 @@ jobs:
             fi
           done
 
-          if [[ ! -d "${payload_dir}/Payload/HermesMobile.app/Frameworks" ]]; then
-            echo "Frameworks directory is missing from the app bundle" >&2
-            exit 1
-          fi
+          # The project may link only static products, in which case Xcode does
+          # not create a Frameworks directory. If it exists, ditto already
+          # preserved it with the rest of the app bundle.
 
           (cd "${payload_dir}" && /usr/bin/zip -qry "${PACKAGE_PATH}" Payload)
           unzip -l "${PACKAGE_PATH}"
@@ -119,7 +118,6 @@ jobs:
           test -d "${app}/PlugIns/HermesShareExtension.appex"
           test -d "${app}/PlugIns/HermesLiveActivityWidget.appex"
           test -d "${app}/PlugIns/HermesNotificationService.appex"
-          test -d "${app}/Frameworks"
 
           # CODE_SIGNING_ALLOWED=NO must leave bundles unsigned. External signing
           # is intentionally a separate step performed by the installer/owner.
