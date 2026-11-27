@@ -1,0 +1,53 @@
+name: Build Hermex IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify Xcode
+        run: xcodebuild -version
+      - name: Build unsigned iPhone app
+        run: |
+          set -euo pipefail
+          xcodebuild build \
+            -project HermesMobile.xcodeproj \
+            -scheme HermesMobile \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -sdk iphoneos \
+            -derivedDataPath DerivedData \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            2>&1 | tee build.log
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          app="DerivedData/Build/Products/Release-iphoneos/HermesMobile.app"
+          test -d "$app"
+          mkdir -p Payload
+          ditto "$app" Payload/HermesMobile.app
+          ditto -c -k --keepParent Payload Hermex.ipa
+          unzip -t Hermex.ipa
+      - name: Upload IPA
+        uses: actions/upload-artifact@v7
+        with:
+          name: Hermex-IPA
+          path: Hermex.ipa
+          if-no-files-found: error
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
